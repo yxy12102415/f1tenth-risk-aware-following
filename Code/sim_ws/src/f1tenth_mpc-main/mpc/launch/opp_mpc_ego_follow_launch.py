@@ -46,6 +46,7 @@ def generate_launch_description():
                 'min_speed_command': 0.3,
                 'max_speed': 2.2,
                 'max_accel': 1.0,
+                'startup_delay': 1.0,
                 'wall_stop_distance': 0.45,
                 'wall_slow_distance': 0.8,
                 'side_wall_distance': 0.6,

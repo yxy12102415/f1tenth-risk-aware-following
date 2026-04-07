@@ -59,6 +59,7 @@ class EgoMPCFollower(Node):
         self.declare_parameter('min_speed_command', 0.3)
         self.declare_parameter('max_speed', 1.5)
         self.declare_parameter('max_accel', 0.8)
+        self.declare_parameter('startup_delay', 1.0)
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('wall_stop_distance', 0.45)
         self.declare_parameter('wall_slow_distance', 0.8)
@@ -74,6 +75,7 @@ class EgoMPCFollower(Node):
         self.min_speed_command = float(self.get_parameter('min_speed_command').value)
         max_speed = float(self.get_parameter('max_speed').value)
         max_accel = float(self.get_parameter('max_accel').value)
+        self.startup_delay = float(self.get_parameter('startup_delay').value)
         self.wall_stop_distance = float(self.get_parameter('wall_stop_distance').value)
         self.wall_slow_distance = float(self.get_parameter('wall_slow_distance').value)
         self.side_wall_distance = float(self.get_parameter('side_wall_distance').value)
@@ -93,6 +95,7 @@ class EgoMPCFollower(Node):
         self.target = None
         self.target_stamp = None
         self.scan = None
+        self.start_time = self.get_clock().now()
         self.oa = None
         self.odelta = None
 
@@ -127,6 +130,10 @@ class EgoMPCFollower(Node):
 
     def control_loop(self) -> None:
         drive = AckermannDriveStamped()
+
+        if (self.get_clock().now() - self.start_time).nanoseconds * 1e-9 < self.startup_delay:
+            self.drive_pub.publish(drive)
+            return
 
         if self.ego is None or self.target is None or self.target_stamp is None:
             self.drive_pub.publish(drive)
