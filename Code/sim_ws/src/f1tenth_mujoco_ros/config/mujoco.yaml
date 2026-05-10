@@ -1,0 +1,41 @@
+mujoco_bridge:
+  ros__parameters:
+    model_path: ""
+    num_agent: 2
+    drive_topic: "/drive"
+    odom_topic: "/ego_racecar/odom"
+    base_frame: "ego_racecar/base_link"
+    opp_drive_topic: "/opp_drive"
+    opp_odom_topic: "/opp_racecar/odom"
+    ego_opp_odom_topic: "/ego_racecar/opp_odom"
+    opp_base_frame: "opp_racecar/base_link"
+    scan_topic: "/scan"
+    map_csv_path: ""
+    map_frame: "map"
+    publish_tf: true
+    use_viewer: true
+    follow_camera: false
+
+    sx: -23.1983
+    sy: 22.1783
+    stheta: -0.787580
+    sx1: -21.9370
+    sy1: 20.9170
+    stheta1: -0.782731
+
+    wheelbase: 0.33
+    max_speed: 5.0
+    max_accel: 4.0
+    max_steer: 0.4189
+    control_timeout: 0.5
+    sim_dt: 0.01
+    publish_dt: 0.02
+    scan_publish_dt: 0.12
+    viewer_dt: 0.05
+    scan_fov: 4.7
+    scan_beams: 240
+    scan_range_min: 0.05
+    scan_range_max: 30.0
+    scan_distance_to_base_link: 0.275
+    opponent_lidar_radius: 0.28
+    track_segment_stride: 24

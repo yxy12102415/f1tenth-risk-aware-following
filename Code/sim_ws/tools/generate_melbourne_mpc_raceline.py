@@ -12,12 +12,12 @@ DS = 0.05
 SMOOTH_ITERS = 2
 
 V_MIN = 1.0
-V_MAX = 2.5
-A_LAT_MAX = 4.0
+V_MAX = 2.2
+A_LAT_MAX = 2.8
 KAPPA_FLOOR = 1e-3
 SPEED_SMOOTH_WINDOW = 15
 YAW_SMOOTH_WINDOW = 11
-MAX_DV_PER_STEP = 0.02
+MAX_DV_PER_STEP = 0.01
 
 
 def wrap_angle(angle: float) -> float:

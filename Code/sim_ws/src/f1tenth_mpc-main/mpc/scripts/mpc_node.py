@@ -17,7 +17,6 @@ from sensor_msgs.msg import LaserScan
 import utils
 from numpy import linalg as LA
 from visualization_msgs.msg import Marker, MarkerArray
-import csv
 import os
 
 
@@ -59,9 +58,9 @@ class mpc_config:
     MIN_STEER: float = -0.4189  # maximum steering angle [rad]
     MAX_STEER: float = 0.4189  # maximum steering angle [rad]
     MAX_DSTEER: float = np.deg2rad(180.0)  # maximum steering speed [rad/s]
-    MAX_SPEED: float = 2.0  # maximum speed [m/s]
+    MAX_SPEED: float = 3.0  # maximum speed [m/s]
     MIN_SPEED: float = 0.0  # minimum backward speed [m/s]
-    MAX_ACCEL: float = 0.8  # maximum acceleration [m/ss]
+    MAX_ACCEL: float = 1.0  # maximum acceleration [m/ss]
     # MAX_ERROR: float = 100  # maximum error placement to reference trajectory[m]
 
 @dataclass
@@ -81,13 +80,14 @@ class MPC(Node):
     def __init__(self):
         super().__init__('mpc_node')
         # Create ROS subscribers and publishers 
-        # Initialize the trajectory recording matrix and the directory to save
-        self.trajectory_data = []  # List to store trajectory data
+        # Initialize package paths.
         self.share_directory = get_package_share_directory("mpc")
         self.output_directory = os.path.join(self.share_directory, "waypoints")
         
         # publishers
-        self.drive_pub_ = self.create_publisher(AckermannDriveStamped, '/drive', 1) 
+        self.declare_parameter("drive_topic", "/drive")
+        self.drive_topic = self.get_parameter("drive_topic").get_parameter_value().string_value
+        self.drive_pub_ = self.create_publisher(AckermannDriveStamped, self.drive_topic, 1) 
         self.ref_path_vis_pub_ = self.create_publisher(Marker, "/ref_path_vis", 1)
         self.pred_path_vis_pub_ = self.create_publisher(Marker, "/pred_path_vis", 1)
         self.waypoints_vis_pub_ = self.create_publisher(MarkerArray, "/waypoints", 1)
@@ -113,16 +113,6 @@ class MPC(Node):
 
         # initialize MPC problem
         self.mpc_prob_init()
-
-    # This function is for recording trajectory of the vehicle to evaluate the performance of the MPC controller
-    # Comment it out if you don't need, and correct the main 
-    def write_trajectory_to_csv(self):
-        filename = os.path.join(self.output_directory, 'trajectory_recorded.csv')
-        with open(filename, 'w', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(['x', 'y'])
-            writer.writerows(self.trajectory_data)
-        print(f"Trajectory data saved to {filename}")
 
     def pose_callback(self, pose_msg):
 
@@ -185,12 +175,6 @@ class MPC(Node):
         drive_msg.drive.steering_angle = self.odelta_v[0]
         drive_msg.drive.speed = max(vehicle_state.v + self.oa[0] * self.config.DTK, 0.3)
         self.drive_pub_.publish(drive_msg)
-        self.trajectory_data.append([
-        pose_msg.pose.pose.position.x,
-        pose_msg.pose.pose.position.y,
-        ]) 
-        
-    
 
     def mpc_prob_init(self):
         """
@@ -651,13 +635,6 @@ class MPC(Node):
 
         return waypoints
 
-    # This functions is running the write_trajectory_to_csv() to save the trajectory
-    # Comment it if you just need a normal main()
-    def destroy_node(self):
-        # Save trajectory data when shutting down
-        self.write_trajectory_to_csv()
-        super().destroy_node()
-
 def main(args=None):
     rclpy.init(args=args)
     print("MPC Initialized")
@@ -673,18 +650,6 @@ def main(args=None):
         # This ensures that your node is cleaned up properly regardless of what happens
         mpc_node.destroy_node()
         rclpy.shutdown()
-
-
-# The normal main(), uncomment if you don't need to save the running trajectory
-# Before you uncomment this main, make sure you comment out the  destroy_node(),write_trajectory_to_csv()
-# def main(args=None):
-#     rclpy.init(args=args)
-#     print("MPC Initialized")
-#     mpc_node = MPC()
-#     rclpy.spin(mpc_node)
-
-#     mpc_node.destroy_node()
-#     rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

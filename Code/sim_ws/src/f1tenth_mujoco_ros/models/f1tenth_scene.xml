@@ -1,0 +1,47 @@
+<mujoco model="f1tenth_flat_world">
+  <compiler angle="radian" coordinate="local"/>
+  <option timestep="0.005" gravity="0 0 -9.81"/>
+  <visual>
+    <headlight ambient="0.55 0.55 0.55" diffuse="0.35 0.35 0.35" specular="0 0 0"/>
+    <rgba haze="0.78 0.82 0.88 1"/>
+    <global azimuth="135" elevation="-35"/>
+  </visual>
+
+  <asset>
+    <texture name="melbourne_map" type="2d" file="../maps/Melbourne_map.png"/>
+    <material name="melbourne_map" texture="melbourne_map" texrepeat="1 1" reflectance="0" specular="0" shininess="0"/>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1="0.62 0.64 0.64" rgb2="0.78 0.80 0.78"/>
+    <material name="grid" texture="grid" texrepeat="16 16" reflectance="0" specular="0" shininess="0"/>
+    <material name="body_blue" rgba="0.06 0.36 1.0 1"/>
+    <material name="body_red" rgba="0.95 0.12 0.08 1"/>
+    <material name="wheel_dark" rgba="0.03 0.03 0.035 1"/>
+    <material name="lidar_green" rgba="0.0 0.8 0.35 1"/>
+  </asset>
+
+  <worldbody>
+    <light name="sun" pos="0 0 12" dir="0 0 -1" ambient="0.45 0.45 0.45" diffuse="0.7 0.7 0.7" specular="0 0 0"/>
+    <light name="fill" pos="-5 -4 5" dir="1 1 -1" ambient="0.25 0.25 0.25" diffuse="0.3 0.3 0.3" specular="0 0 0"/>
+    <geom name="floor" type="plane" size="95 95 0.05" material="grid" friction="1.2 0.02 0.001" pos="8.3332 40.1062 -0.02"/>
+    <geom name="melbourne_map" type="plane" size="90.09 90.09 0.01" material="melbourne_map" friction="1.2 0.02 0.001" pos="8.3332 40.1062 -0.005"/>
+
+    <body name="ego_car" pos="-23.1983 22.1783 0.09">
+      <freejoint name="ego_root"/>
+      <geom name="ego_chassis" type="box" size="0.29 0.155 0.055" pos="0 0 0.055" material="body_blue" mass="3.0"/>
+      <geom name="ego_lidar" type="cylinder" size="0.045 0.025" pos="0.275 0 0.135" material="lidar_green" mass="0.05"/>
+      <geom name="ego_front_left_wheel" type="cylinder" size="0.045 0.025" pos="0.165 0.13 0.045" euler="1.5708 0 0" material="wheel_dark" mass="0.1"/>
+      <geom name="ego_front_right_wheel" type="cylinder" size="0.045 0.025" pos="0.165 -0.13 0.045" euler="1.5708 0 0" material="wheel_dark" mass="0.1"/>
+      <geom name="ego_rear_left_wheel" type="cylinder" size="0.045 0.025" pos="-0.165 0.13 0.045" euler="1.5708 0 0" material="wheel_dark" mass="0.1"/>
+      <geom name="ego_rear_right_wheel" type="cylinder" size="0.045 0.025" pos="-0.165 -0.13 0.045" euler="1.5708 0 0" material="wheel_dark" mass="0.1"/>
+    </body>
+
+    <body name="opp_car" pos="-21.9370 20.9170 0.09">
+      <freejoint name="opp_root"/>
+      <geom name="opp_chassis" type="box" size="0.29 0.155 0.055" pos="0 0 0.055" material="body_red" mass="3.0"/>
+      <geom name="opp_lidar" type="cylinder" size="0.045 0.025" pos="0.275 0 0.135" material="lidar_green" mass="0.05"/>
+      <geom name="opp_front_left_wheel" type="cylinder" size="0.045 0.025" pos="0.165 0.13 0.045" euler="1.5708 0 0" material="wheel_dark" mass="0.1"/>
+      <geom name="opp_front_right_wheel" type="cylinder" size="0.045 0.025" pos="0.165 -0.13 0.045" euler="1.5708 0 0" material="wheel_dark" mass="0.1"/>
+      <geom name="opp_rear_left_wheel" type="cylinder" size="0.045 0.025" pos="-0.165 0.13 0.045" euler="1.5708 0 0" material="wheel_dark" mass="0.1"/>
+      <geom name="opp_rear_right_wheel" type="cylinder" size="0.045 0.025" pos="-0.165 -0.13 0.045" euler="1.5708 0 0" material="wheel_dark" mass="0.1"/>
+    </body>
+  </worldbody>
+</mujoco>
