@@ -71,6 +71,10 @@ class OppPIDNode(Node):
         self.waypoints = self.load_waypoints(self.waypoints_path)
         self.steer_pid = PIDState()
         self.speed_pid = PIDState()
+        self.get_logger().info(
+            f"Loaded {len(self.waypoints)} raceline waypoints from {self.waypoints_path}; "
+            f"subscribing to {self.pose_topic}, publishing {self.drive_topic}"
+        )
 
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.create_subscription(Odometry, self.pose_topic, self.pose_callback, 10)

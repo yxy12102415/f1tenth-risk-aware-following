@@ -63,7 +63,7 @@ def generate_launch_description():
             executable="opponent_ekf_tracker.py",
             name="opp_ekf_tracker",
             parameters=[{
-                "measurement_source": "lidar",
+                "measurement_source": "odom",
                 "measurement_topic": "/ego_racecar/opp_odom",
                 "scan_topic": "/scan",
                 "ego_odom_topic": "/ego_racecar/odom",
@@ -96,7 +96,7 @@ def generate_launch_description():
                 "max_speed": 2.8,
                 "max_accel": 2.5,
                 "max_steer": 0.4189,
-                "startup_delay": 0.2,
+                "startup_delay": 1.0,
                 "wall_stop_distance": 0.2,
                 "wall_slow_distance": 1.0,
                 "cbf_front_gamma": 2.0,
