@@ -1,2 +1,11 @@
-
-Code/sim_ws/src/f1tenth_gym_ros
+Code/sim_ws/build/
+Code/sim_ws/install/
+Code/sim_ws/log/
+Code/sim_ws/results/
+Code/sim_ws/external/
+Code/sim_ws/MUJOCO_LOG.TXT
+Code/sim_ws/mjmodel.mjb
+Code/sim_ws/mjmodel.xml
+build/
+install/
+log/

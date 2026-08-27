@@ -33,6 +33,8 @@ class OpponentEKFTracker(Node):
         self.declare_parameter('min_cluster_width', 0.05)
         self.declare_parameter('max_cluster_width', 0.75)
         self.declare_parameter('association_gate', 1.2)
+        self.declare_parameter('reacquisition_gate', 1.5)
+        self.declare_parameter('reacquisition_after_missed_scans', 3)
 
         measurement_source = self.get_parameter('measurement_source').value
         measurement_topic = self.get_parameter('measurement_topic').value
@@ -64,6 +66,14 @@ class OpponentEKFTracker(Node):
         self.min_cluster_width = float(self.get_parameter('min_cluster_width').value)
         self.max_cluster_width = float(self.get_parameter('max_cluster_width').value)
         self.association_gate = float(self.get_parameter('association_gate').value)
+        self.reacquisition_gate = max(
+            self.association_gate,
+            float(self.get_parameter('reacquisition_gate').value),
+        )
+        self.reacquisition_after_missed_scans = max(
+            1, int(self.get_parameter('reacquisition_after_missed_scans').value)
+        )
+        self.missed_lidar_scans = 0
 
         q_pos = float(self.get_parameter('process_noise_pos').value)
         q_vel = float(self.get_parameter('process_noise_vel').value)
@@ -95,7 +105,9 @@ class OpponentEKFTracker(Node):
 
         detection = self.extract_lidar_target(msg)
         if detection is None:
+            self.missed_lidar_scans += 1
             return
+        self.missed_lidar_scans = 0
 
         rel_x, rel_y = detection
         ego_yaw = self.yaw_from_odom(self.ego_odom)
@@ -160,6 +172,8 @@ class OpponentEKFTracker(Node):
             width = self.cluster_width(cluster)
             if width < self.min_cluster_width or width > self.max_cluster_width:
                 continue
+            if cx <= 0.0:
+                continue
             candidates.append((distance, cx, cy))
 
         if not candidates:
@@ -172,7 +186,12 @@ class OpponentEKFTracker(Node):
                 for _distance, cx, cy in candidates
             ]
             best_error, cx, cy = min(gated, key=lambda item: item[0])
-            if best_error <= self.association_gate:
+            gate = (
+                self.reacquisition_gate
+                if self.missed_lidar_scans >= self.reacquisition_after_missed_scans
+                else self.association_gate
+            )
+            if best_error <= gate and cx > 0.0:
                 return cx, cy
 
             # Keep predicting rather than snapping to a wall-like cluster when

@@ -1,0 +1,40 @@
+{
+  "lateral_offset_m": 0.7,
+  "obstacle_radius_m": 0.32,
+  "scenarios": {
+    "center": {
+      "center_pixel": [
+        703,
+        1251
+      ],
+      "center_world_m": [
+        -18.4,
+        17.38
+      ],
+      "map_name": "Melbourne_map_obstacle_center"
+    },
+    "left": {
+      "center_pixel": [
+        709,
+        1246
+      ],
+      "center_world_m": [
+        -17.90522237322624,
+        17.87517178841704
+      ],
+      "map_name": "Melbourne_map_obstacle_left"
+    },
+    "right": {
+      "center_pixel": [
+        698,
+        1257
+      ],
+      "center_world_m": [
+        -18.894777626773756,
+        16.88482821158296
+      ],
+      "map_name": "Melbourne_map_obstacle_right"
+    }
+  },
+  "source_map": "Melbourne_map"
+}

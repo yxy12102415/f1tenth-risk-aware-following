@@ -62,6 +62,8 @@ install(PROGRAMS
   scripts/opponent_ekf_tracker.py
   scripts/ego_ekf_follower.py
   scripts/ego_mpc_follower.py
+  scripts/safety_arbiter.py
+  scripts/baseline_evaluator.py
   scripts/plot_race_trajectories.py
   scripts/utils.py
   scripts/waypoint_spline.py

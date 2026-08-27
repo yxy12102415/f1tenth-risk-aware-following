@@ -51,6 +51,11 @@ class OppPIDNode(Node):
         self.declare_parameter("kd_speed", 0.05)
         self.declare_parameter("max_accel", 1.0)
         self.declare_parameter("dt", 0.05)
+        self.declare_parameter("scenario", "constant_speed")
+        self.declare_parameter("scenario_period", 12.0)
+        self.declare_parameter("constant_speed", 1.6)
+        self.declare_parameter("turning_speed", 1.2)
+        self.declare_parameter("stop_duration", 3.0)
 
         self.waypoints_path = self.get_parameter("waypoints_path").value
         self.pose_topic = self.get_parameter("pose_topic").value
@@ -67,6 +72,12 @@ class OppPIDNode(Node):
         self.kd_speed = float(self.get_parameter("kd_speed").value)
         self.max_accel = float(self.get_parameter("max_accel").value)
         self.dt = float(self.get_parameter("dt").value)
+        self.scenario = str(self.get_parameter("scenario").value)
+        self.scenario_period = max(float(self.get_parameter("scenario_period").value), 2.0)
+        self.constant_speed = float(self.get_parameter("constant_speed").value)
+        self.turning_speed = float(self.get_parameter("turning_speed").value)
+        self.stop_duration = max(float(self.get_parameter("stop_duration").value), 0.5)
+        self.scenario_start = self.get_clock().now()
 
         self.waypoints = self.load_waypoints(self.waypoints_path)
         self.steer_pid = PIDState()
@@ -117,7 +128,8 @@ class OppPIDNode(Node):
             self.max_steer,
         )
 
-        target_speed = min(max(target[3], self.min_speed), self.max_speed)
+        elapsed = (self.get_clock().now() - self.scenario_start).nanoseconds * 1e-9
+        target_speed = self.scenario_target_speed(elapsed, float(target[3]))
         speed_error = target_speed - current_speed
         speed_delta = self.pid_step(
             speed_error,
@@ -128,12 +140,30 @@ class OppPIDNode(Node):
             -self.max_accel * self.dt,
             self.max_accel * self.dt,
         )
-        speed = min(max(current_speed + speed_delta, self.min_speed), self.max_speed)
+        output_min_speed = 0.0 if target_speed < self.min_speed else self.min_speed
+        speed = min(max(current_speed + speed_delta, output_min_speed), self.max_speed)
 
         drive = AckermannDriveStamped()
         drive.drive.steering_angle = float(steering)
         drive.drive.speed = float(speed)
         self.drive_pub.publish(drive)
+
+    def scenario_target_speed(self, elapsed: float, waypoint_speed: float) -> float:
+        phase = (elapsed % self.scenario_period) / self.scenario_period
+        if self.scenario == "constant_speed":
+            speed = self.constant_speed
+        elif self.scenario == "accel_brake":
+            triangle = 1.0 - abs(2.0 * phase - 1.0)
+            speed = self.min_speed + triangle * (self.max_speed - self.min_speed)
+        elif self.scenario == "turning":
+            speed = min(self.turning_speed, waypoint_speed)
+        elif self.scenario == "stop_go":
+            moving_duration = max(self.scenario_period - self.stop_duration, 0.5)
+            speed = self.constant_speed if (elapsed % self.scenario_period) < moving_duration else 0.0
+        else:
+            self.get_logger().warn(f"Unknown scenario '{self.scenario}', using waypoint speed")
+            speed = waypoint_speed
+        return float(np.clip(speed, 0.0, self.max_speed))
 
     def pid_step(
         self,

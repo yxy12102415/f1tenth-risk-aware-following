@@ -2,14 +2,22 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
     share_directory = os.path.join(get_package_share_directory('mpc'), 'waypoints', '')
     waypoint_path = share_directory + 'Melbourne_map_mpc.csv'
+    scenario = LaunchConfiguration('scenario')
+    run_id = LaunchConfiguration('run_id')
+    results_root = LaunchConfiguration('results_root')
 
     return LaunchDescription([
+        DeclareLaunchArgument('scenario', default_value='constant_speed'),
+        DeclareLaunchArgument('run_id', default_value=''),
+        DeclareLaunchArgument('results_root', default_value=os.path.join(os.getcwd(), 'results')),
         Node(
             package='mpc',
             executable='opp_pid_node.py',
@@ -28,6 +36,7 @@ def generate_launch_description():
                 'kp_speed': 1.0,
                 'ki_speed': 0.0,
                 'kd_speed': 0.05,
+                'scenario': scenario,
             }],
             output='screen',
         ),
@@ -46,6 +55,8 @@ def generate_launch_description():
                 'min_cluster_points': 9,
                 'max_cluster_points': 100,
                 'association_gate': 0.7,
+                'reacquisition_gate': 1.5,
+                'reacquisition_after_missed_scans': 3,
                 'output_topic': '/ego_racecar/opp_odom_ekf',
                 'output_pose_topic': '/ego_racecar/opp_odom_ekf_pose',
             }],
@@ -58,11 +69,16 @@ def generate_launch_description():
             parameters=[{
                 'ego_odom_topic': '/ego_racecar/odom',
                 'target_odom_topic': '/ego_racecar/opp_odom_ekf',
-                'drive_topic': '/drive',
+                'drive_topic': '/drive_nominal',
                 'debug_drive_topic': '/ego_mpc_debug_cmd',
                 'scan_topic': '/scan',
-                'follow_distance': 0.5,
+                'follow_distance': 1.0,
                 'target_timeout': 1.2,
+                'scan_timeout': 0.4,
+                'odom_timeout': 0.4,
+                'recovery_valid_cycles': 3,
+                'control_tolerance': 0.001,
+                'max_transient_planner_failures': 2,
                 'min_speed_command': 0.3,
                 'max_speed': 3.0,
                 'max_accel': 2.0,
@@ -72,6 +88,36 @@ def generate_launch_description():
                 'cbf_front_gamma': 2.0,
                 'cbf_q_accel': 1.0,
                 'cbf_q_steer': 30.0,
+            }],
+            output='screen',
+        ),
+        Node(
+            package='mpc',
+            executable='safety_arbiter.py',
+            name='safety_arbiter',
+            parameters=[{
+                'nominal_topic': '/drive_nominal',
+                'drive_topic': '/drive',
+                'nominal_timeout': 0.2,
+                'publish_rate': 20.0,
+                'max_speed': 3.0,
+                'max_steer': 0.5,
+                'recovery_valid_commands': 3,
+            }],
+            output='screen',
+        ),
+        Node(
+            package='mpc',
+            executable='baseline_evaluator.py',
+            name='baseline_evaluator',
+            parameters=[{
+                'scenario': scenario,
+                'run_id': run_id,
+                'results_root': results_root,
+                'follow_distance': 1.0,
+                'estimate_timeout': 0.4,
+                'sample_rate': 20.0,
+                'control_topic': '/drive',
             }],
             output='screen',
         ),

@@ -32,6 +32,6 @@ source "$ROS_SETUP"
 export LD_LIBRARY_PATH="/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 export ROS_LOG_DIR="$PWD/log/ros"
 mkdir -p "$ROS_LOG_DIR"
-colcon build --packages-select f1tenth_mujoco_ros mpc
+colcon build --packages-select f1tenth_gym_ros mpc
 source install/setup.bash
-ros2 launch f1tenth_mujoco_ros mujoco_bridge_launch.py "$@"
+exec ros2 launch mpc gym_ego_follow_launch.py "$@"

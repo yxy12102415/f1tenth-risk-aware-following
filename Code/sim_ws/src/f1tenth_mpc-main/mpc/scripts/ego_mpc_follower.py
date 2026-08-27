@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import heapq
 import math
+import time
 from dataclasses import dataclass, field
 
 import cvxpy
@@ -14,6 +15,7 @@ from scipy.interpolate import CubicSpline
 from scipy.sparse import block_diag, csc_matrix
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool, Float64
 from visualization_msgs.msg import Marker
 
 
@@ -63,10 +65,15 @@ class EgoMPCFollower(Node):
 
         self.declare_parameter('ego_odom_topic', '/ego_racecar/odom')
         self.declare_parameter('target_odom_topic', '/ego_racecar/opp_odom_ekf')
-        self.declare_parameter('drive_topic', '/drive')
+        self.declare_parameter('drive_topic', '/drive_nominal')
         self.declare_parameter('debug_drive_topic', '/ego_mpc_debug_cmd')
         self.declare_parameter('follow_distance', 1.5)
         self.declare_parameter('target_timeout', 0.3)
+        self.declare_parameter('scan_timeout', 0.4)
+        self.declare_parameter('odom_timeout', 0.4)
+        self.declare_parameter('recovery_valid_cycles', 3)
+        self.declare_parameter('control_tolerance', 1e-3)
+        self.declare_parameter('max_transient_planner_failures', 2)
         self.declare_parameter('min_speed_command', 0.3)
         self.declare_parameter('max_speed', 1.5)
         self.declare_parameter('max_accel', 0.8)
@@ -85,6 +92,11 @@ class EgoMPCFollower(Node):
         self.declare_parameter('hybrid_astar_yaw_bins', 24)
         self.declare_parameter('hybrid_astar_step_distance', 0.25)
         self.declare_parameter('hybrid_astar_max_expansions', 5000)
+        self.declare_parameter('fault_inject_scan_timeout', False)
+        self.declare_parameter('fault_inject_odom_timeout', False)
+        self.declare_parameter('fault_inject_target_timeout', False)
+        self.declare_parameter('fault_inject_planner_failure', False)
+        self.declare_parameter('fault_inject_solver_failure', False)
 
         ego_topic = self.get_parameter('ego_odom_topic').value
         target_topic = self.get_parameter('target_odom_topic').value
@@ -94,6 +106,13 @@ class EgoMPCFollower(Node):
 
         self.follow_distance = float(self.get_parameter('follow_distance').value)
         self.target_timeout = float(self.get_parameter('target_timeout').value)
+        self.scan_timeout = float(self.get_parameter('scan_timeout').value)
+        self.odom_timeout = float(self.get_parameter('odom_timeout').value)
+        self.recovery_valid_cycles = max(1, int(self.get_parameter('recovery_valid_cycles').value))
+        self.control_tolerance = max(float(self.get_parameter('control_tolerance').value), 0.0)
+        self.max_transient_planner_failures = max(
+            0, int(self.get_parameter('max_transient_planner_failures').value)
+        )
         self.min_speed_command = float(self.get_parameter('min_speed_command').value)
         max_speed = float(self.get_parameter('max_speed').value)
         max_accel = float(self.get_parameter('max_accel').value)
@@ -117,6 +136,9 @@ class EgoMPCFollower(Node):
         self.pred_path_pub = self.create_publisher(Marker, '/ego_mpc_pred_path_vis', 1)
         self.ref_path_pub = self.create_publisher(Marker, '/ego_mpc_ref_path_vis', 1)
         self.astar_path_pub = self.create_publisher(Marker, '/ego_astar_path_vis', 1)
+        self.planning_time_pub = self.create_publisher(Float64, '/ego_mpc/planning_time_ms', 10)
+        self.solve_time_pub = self.create_publisher(Float64, '/ego_mpc/solve_time_ms', 10)
+        self.planner_valid_pub = self.create_publisher(Bool, '/ego_mpc/planner_valid', 10)
         self.create_subscription(Odometry, ego_topic, self.ego_callback, 10)
         self.create_subscription(Odometry, target_topic, self.target_callback, 10)
         self.create_subscription(LaserScan, scan_topic, self.scan_callback, 10)
@@ -128,18 +150,24 @@ class EgoMPCFollower(Node):
         self.config.MAX_STEER = max_steer
         self.config.MIN_STEER = -max_steer
         self.ego = None
+        self.ego_stamp = None
         self.target = None
         self.target_stamp = None
         self.scan = None
+        self.scan_stamp = None
         self.latest_astar_path = []
         self.start_time = self.get_clock().now()
         self.oa = None
         self.odelta = None
+        self.valid_cycle_count = 0
+        self.planner_failure_count = 0
+        self.last_stop_reason = None
 
         self.mpc_prob_init()
 
     def ego_callback(self, msg: Odometry) -> None:
         self.ego = msg
+        self.ego_stamp = self.get_clock().now()
 
     def target_callback(self, msg: Odometry) -> None:
         self.target = msg
@@ -147,6 +175,54 @@ class EgoMPCFollower(Node):
 
     def scan_callback(self, msg: LaserScan) -> None:
         self.scan = msg
+        self.scan_stamp = self.get_clock().now()
+
+    def fault_enabled(self, name: str) -> bool:
+        return bool(self.get_parameter(name).value)
+
+    def publish_safe_stop(
+        self,
+        reason: str,
+        reset_validity: bool = True,
+        reset_warm_start: bool = True,
+    ) -> None:
+        if reset_validity:
+            self.valid_cycle_count = 0
+        if reset_warm_start:
+            self.oa = None
+            self.odelta = None
+        drive = AckermannDriveStamped()
+        drive.header.stamp = self.get_clock().now().to_msg()
+        drive.header.frame_id = 'ego_racecar/base_link'
+        drive.drive.speed = 0.0
+        drive.drive.steering_angle = 0.0
+        drive.drive.acceleration = 0.0
+        self.drive_pub.publish(drive)
+        if reason != self.last_stop_reason:
+            self.get_logger().warn(f'SAFETY STOP: {reason}')
+            self.last_stop_reason = reason
+
+    def publish_transient_deceleration(self, reason: str) -> None:
+        self.valid_cycle_count = 0
+        current_speed = math.hypot(
+            self.ego.twist.twist.linear.x,
+            self.ego.twist.twist.linear.y,
+        )
+        drive = AckermannDriveStamped()
+        drive.header.stamp = self.get_clock().now().to_msg()
+        drive.header.frame_id = 'ego_racecar/base_link'
+        drive.drive.speed = max(0.0, current_speed - self.config.MAX_ACCEL * self.config.DTK)
+        drive.drive.steering_angle = 0.0
+        drive.drive.acceleration = -self.config.MAX_ACCEL
+        self.drive_pub.publish(drive)
+        if reason != self.last_stop_reason:
+            self.get_logger().warn(f'SAFETY DECEL: {reason}')
+            self.last_stop_reason = reason
+
+    def input_age(self, stamp) -> float:
+        if stamp is None:
+            return float('inf')
+        return (self.get_clock().now() - stamp).nanoseconds * 1e-9
 
     def sector_min_distance(self, angle_min_deg: float, angle_max_deg: float) -> float:
         if self.scan is None:
@@ -166,19 +242,18 @@ class EgoMPCFollower(Node):
         return best
 
     def control_loop(self) -> None:
-        drive = AckermannDriveStamped()
-
         if (self.get_clock().now() - self.start_time).nanoseconds * 1e-9 < self.startup_delay:
-            self.drive_pub.publish(drive)
+            self.publish_safe_stop('startup delay')
             return
 
-        if self.ego is None or self.target is None or self.target_stamp is None:
-            self.drive_pub.publish(drive)
+        if self.fault_enabled('fault_inject_scan_timeout') or self.input_age(self.scan_stamp) > self.scan_timeout:
+            self.publish_safe_stop('scan timeout')
             return
-
-        age = (self.get_clock().now() - self.target_stamp).nanoseconds * 1e-9
-        if age > self.target_timeout:
-            self.drive_pub.publish(drive)
+        if self.fault_enabled('fault_inject_odom_timeout') or self.input_age(self.ego_stamp) > self.odom_timeout:
+            self.publish_safe_stop('odom timeout')
+            return
+        if self.fault_enabled('fault_inject_target_timeout') or self.input_age(self.target_stamp) > self.target_timeout:
+            self.publish_safe_stop('target timeout')
             return
 
         ego_yaw = yaw_from_odom(self.ego)
@@ -197,7 +272,21 @@ class EgoMPCFollower(Node):
         self.update_safety_margin(front_dist)
         x0 = [ego_state.x, ego_state.y, ego_state.v, ego_state.yaw]
 
-        ref_path = self.build_reference_trajectory(ego_state)
+        planning_start = time.perf_counter()
+        ref_path, planner_valid = self.build_reference_trajectory(ego_state)
+        planning_ms = (time.perf_counter() - planning_start) * 1000.0
+        self.planning_time_pub.publish(Float64(data=float(planning_ms)))
+        self.planner_valid_pub.publish(Bool(data=bool(planner_valid)))
+        if not planner_valid:
+            self.planner_failure_count += 1
+            if self.planner_failure_count <= self.max_transient_planner_failures:
+                self.publish_transient_deceleration('transient planner failure')
+            else:
+                self.publish_safe_stop('persistent planner failure')
+            return
+        self.planner_failure_count = 0
+
+        solve_start = time.perf_counter()
         (
             self.oa,
             self.odelta,
@@ -207,14 +296,42 @@ class EgoMPCFollower(Node):
             _oyaw,
             _path_predict,
         ) = self.linear_mpc_control(ref_path, x0, self.oa, self.odelta)
+        solve_ms = (time.perf_counter() - solve_start) * 1000.0
+        self.solve_time_pub.publish(Float64(data=float(solve_ms)))
 
         if self.oa is None or self.odelta is None:
-            self.drive_pub.publish(drive)
+            self.publish_safe_stop('MPC solver failure')
             return
 
         accel_cmd = float(self.oa[0])
         steer_cmd = float(self.odelta[0])
+        if not math.isfinite(accel_cmd) or not math.isfinite(steer_cmd):
+            self.publish_safe_stop('invalid MPC control')
+            return
+        if abs(accel_cmd) > self.config.MAX_ACCEL + self.control_tolerance:
+            self.publish_safe_stop('acceleration outside safety limits')
+            return
+        if (
+            steer_cmd < self.config.MIN_STEER - self.control_tolerance
+            or steer_cmd > self.config.MAX_STEER + self.control_tolerance
+        ):
+            self.publish_safe_stop('steering outside safety limits')
+            return
+        accel_cmd = float(np.clip(accel_cmd, -self.config.MAX_ACCEL, self.config.MAX_ACCEL))
+        steer_cmd = float(np.clip(steer_cmd, self.config.MIN_STEER, self.config.MAX_STEER))
 
+        self.valid_cycle_count += 1
+        if self.valid_cycle_count < self.recovery_valid_cycles:
+            self.publish_safe_stop(
+                f'waiting for {self.recovery_valid_cycles} consecutive valid cycles',
+                reset_validity=False,
+                reset_warm_start=False,
+            )
+            return
+
+        drive = AckermannDriveStamped()
+        drive.header.stamp = self.get_clock().now().to_msg()
+        drive.header.frame_id = 'ego_racecar/base_link'
         drive.drive.steering_angle = steer_cmd
         commanded_speed = np.clip(
             ego_state.v + accel_cmd * self.config.DTK,
@@ -223,6 +340,7 @@ class EgoMPCFollower(Node):
         )
         drive.drive.speed = float(commanded_speed)
         self.drive_pub.publish(drive)
+        self.last_stop_reason = None
 
         debug_drive = AckermannDriveStamped()
         debug_drive.header = drive.header
@@ -264,9 +382,10 @@ class EgoMPCFollower(Node):
 
         goal_x = tx - self.follow_distance * math.cos(target_yaw)
         goal_y = ty - self.follow_distance * math.sin(target_yaw)
-        path = self.plan_astar_path(ego_state, goal_x, goal_y)
-        if len(path) < 2:
-            path = [(ex, ey), (goal_x, goal_y)]
+        path, planner_valid = self.plan_astar_path(ego_state, goal_x, goal_y)
+        if not planner_valid or len(path) < 2:
+            self.latest_astar_path = []
+            return ref_traj, False
         self.latest_astar_path = path
 
         for i in range(self.config.TK + 1):
@@ -277,11 +396,11 @@ class EgoMPCFollower(Node):
             ref_traj[2, i] = desired_speed
             ref_traj[3, i] = ryaw
 
-        return ref_traj
+        return ref_traj, True
 
     def plan_astar_path(self, ego_state: State, goal_x: float, goal_y: float):
-        if self.scan is None:
-            return [(ego_state.x, ego_state.y), (goal_x, goal_y)]
+        if self.scan is None or self.fault_enabled('fault_inject_planner_failure'):
+            return [], False
 
         resolution = max(self.astar_resolution, 0.05)
         radius = max(self.astar_grid_radius, resolution * 4.0)
@@ -324,7 +443,7 @@ class EgoMPCFollower(Node):
         occupancy[start] = False
         goal = self.nearest_free_cell(goal, occupancy)
         if goal is None:
-            return [(ego_state.x, ego_state.y), (goal_x, goal_y)]
+            return [], False
 
         path = self.hybrid_astar_search(
             ego_state,
@@ -335,14 +454,41 @@ class EgoMPCFollower(Node):
             resolution,
         )
         if not path:
-            return [(ego_state.x, ego_state.y), (goal_x, goal_y)]
+            return [], False
 
         path[0] = (ego_state.x, ego_state.y)
+        if not self.path_collision_free(path, occupancy, world_to_grid, resolution):
+            return [], False
+
         smoothed = self.smooth_grid_path(path)
+        if not self.path_collision_free(smoothed, occupancy, world_to_grid, resolution):
+            smoothed = path
         splined = self.spline_smooth_path(smoothed)
-        if self.path_exceeds_steering_limit(splined):
-            return smoothed
-        return splined
+        if (
+            self.path_exceeds_steering_limit(splined)
+            or not self.path_collision_free(splined, occupancy, world_to_grid, resolution)
+        ):
+            return smoothed, True
+        return splined, True
+
+    def path_collision_free(self, path, occupancy, world_to_grid, resolution) -> bool:
+        if not path:
+            return False
+        width, height = occupancy.shape
+        sample_spacing = max(0.5 * resolution, 0.02)
+        for (x0, y0), (x1, y1) in zip(path[:-1], path[1:]):
+            distance = math.hypot(x1 - x0, y1 - y0)
+            sample_count = max(1, int(math.ceil(distance / sample_spacing)))
+            for i in range(sample_count + 1):
+                ratio = i / sample_count
+                x = x0 + ratio * (x1 - x0)
+                y = y0 + ratio * (y1 - y0)
+                gx, gy = world_to_grid(x, y)
+                if not (0 <= gx < width and 0 <= gy < height):
+                    return False
+                if occupancy[gx, gy]:
+                    return False
+        return True
 
     def nearest_free_cell(self, cell, occupancy):
         if not occupancy[cell]:
@@ -670,6 +816,9 @@ class EgoMPCFollower(Node):
         return A, B, C
 
     def mpc_prob_solve(self, ref_traj, path_predict, x0):
+        if self.fault_enabled('fault_inject_solver_failure'):
+            return None, None, None, None, None, None
+
         self.x0k.value = x0
 
         A_block = []
@@ -690,15 +839,29 @@ class EgoMPCFollower(Node):
         self.Ck_.value = C_block
         self.ref_traj_k.value = ref_traj
 
-        self.MPC_prob.solve(solver=cvxpy.OSQP, verbose=False, warm_start=True)
+        try:
+            self.MPC_prob.solve(solver=cvxpy.OSQP, verbose=False, warm_start=True)
+        except Exception as exc:
+            self.get_logger().error(f'Ego MPC solver exception: {exc}')
+            return None, None, None, None, None, None
 
         if self.MPC_prob.status in (cvxpy.OPTIMAL, cvxpy.OPTIMAL_INACCURATE):
+            if self.xk.value is None or self.uk.value is None:
+                self.get_logger().error('Ego MPC returned an empty solution')
+                return None, None, None, None, None, None
             ox = np.array(self.xk.value[0, :]).flatten()
             oy = np.array(self.xk.value[1, :]).flatten()
             ov = np.array(self.xk.value[2, :]).flatten()
             oyaw = np.array(self.xk.value[3, :]).flatten()
             oa = np.array(self.uk.value[0, :]).flatten()
             odelta = np.array(self.uk.value[1, :]).flatten()
+            solution_arrays = (ox, oy, ov, oyaw, oa, odelta)
+            if not all(np.all(np.isfinite(values)) for values in solution_arrays):
+                self.get_logger().error('Ego MPC returned NaN or Inf')
+                return None, None, None, None, None, None
+            if len(oa) == 0 or len(odelta) == 0:
+                self.get_logger().error('Ego MPC returned an empty control sequence')
+                return None, None, None, None, None, None
             return oa, odelta, ox, oy, ov, oyaw
 
         self.get_logger().warn('Ego MPC solve failed')
