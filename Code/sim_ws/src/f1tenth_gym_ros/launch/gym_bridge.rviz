@@ -230,8 +230,8 @@ Visualization Manager:
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -22
-        Y: 21
+        X: 0
+        Y: 0
         Z: 0
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
@@ -239,7 +239,7 @@ Visualization Manager:
       Name: Current View
       Near Clip Distance: 0.009999999776482582
       Pitch: 1.45
-      Target Frame: <Fixed Frame>
+      Target Frame: ego_racecar/base_link
       Value: Orbit (rviz)
       Yaw: 0.8
     Saved: ~

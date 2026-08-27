@@ -45,6 +45,8 @@ class BaselineEvaluator(Node):
         self.latest_planning_ms = float('nan')
         self.latest_solve_ms = float('nan')
         self.latest_planner_valid = None
+        self.latest_front_clearance = float('nan')
+        self.latest_path_heading_error = float('nan')
         self.start_time = self.get_clock().now()
         self.last_steering = None
         self.last_control_time = None
@@ -63,6 +65,7 @@ class BaselineEvaluator(Node):
         self.planning_times = []
         self.solve_times = []
         self.planner_results = []
+        self.front_clearances = []
 
         self.files = {}
         self.writers = {}
@@ -81,6 +84,7 @@ class BaselineEvaluator(Node):
         ])
         self._open_csv('runtime', [
             'time_s', 'planning_time_ms', 'mpc_solve_time_ms', 'planner_valid',
+            'front_clearance_m', 'path_heading_error_rad',
         ])
 
         self.create_subscription(Odometry, '/ego_racecar/odom', self.ego_callback, 20)
@@ -92,6 +96,12 @@ class BaselineEvaluator(Node):
         self.create_subscription(Float64, '/ego_mpc/planning_time_ms', self.planning_callback, 20)
         self.create_subscription(Float64, '/ego_mpc/solve_time_ms', self.solve_callback, 20)
         self.create_subscription(Bool, '/ego_mpc/planner_valid', self.planner_valid_callback, 20)
+        self.create_subscription(
+            Float64, '/ego_mpc/front_clearance_m', self.front_clearance_callback, 20
+        )
+        self.create_subscription(
+            Float64, '/ego_mpc/path_heading_error_rad', self.path_heading_error_callback, 20
+        )
         self.sample_timer = self.create_timer(1.0 / sample_rate, self.sample)
         self.summary_timer = self.create_timer(1.0, self.write_summary)
 
@@ -178,6 +188,14 @@ class BaselineEvaluator(Node):
         self.latest_planner_valid = bool(msg.data)
         self.planner_results.append(self.latest_planner_valid)
 
+    def front_clearance_callback(self, msg: Float64) -> None:
+        self.latest_front_clearance = float(msg.data)
+        if math.isfinite(self.latest_front_clearance):
+            self.front_clearances.append(self.latest_front_clearance)
+
+    def path_heading_error_callback(self, msg: Float64) -> None:
+        self.latest_path_heading_error = float(msg.data)
+
     def sample(self) -> None:
         now = self.get_clock().now()
         estimate_age = float('inf')
@@ -248,6 +266,8 @@ class BaselineEvaluator(Node):
             'planning_time_ms': self.latest_planning_ms,
             'mpc_solve_time_ms': self.latest_solve_ms,
             'planner_valid': '' if self.latest_planner_valid is None else int(self.latest_planner_valid),
+            'front_clearance_m': self.latest_front_clearance,
+            'path_heading_error_rad': self.latest_path_heading_error,
         })
         for handle in self.files.values():
             handle.flush()
@@ -299,6 +319,7 @@ class BaselineEvaluator(Node):
                 'planner_success_rate': (
                     planner_successes / planner_attempts if planner_attempts else None
                 ),
+                'front_clearance_m': self.stats(self.front_clearances),
             },
         }
         path = os.path.join(self.output_dir, 'summary.json')

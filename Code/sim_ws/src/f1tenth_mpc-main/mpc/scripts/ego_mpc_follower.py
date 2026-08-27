@@ -85,6 +85,8 @@ class EgoMPCFollower(Node):
         self.declare_parameter('cbf_front_gamma', 2.0)
         self.declare_parameter('cbf_q_accel', 1.0)
         self.declare_parameter('cbf_q_steer', 30.0)
+        self.declare_parameter('mpc_steer_input_cost', 20.0)
+        self.declare_parameter('mpc_steer_rate_cost', 70.0)
         self.declare_parameter('astar_resolution', 0.18)
         self.declare_parameter('astar_grid_radius', 5.5)
         self.declare_parameter('astar_obstacle_inflation', 0.35)
@@ -92,6 +94,10 @@ class EgoMPCFollower(Node):
         self.declare_parameter('hybrid_astar_yaw_bins', 24)
         self.declare_parameter('hybrid_astar_step_distance', 0.25)
         self.declare_parameter('hybrid_astar_max_expansions', 5000)
+        self.declare_parameter('hybrid_astar_time_budget_ms', 120.0)
+        self.declare_parameter('target_heading_alpha', 0.15)
+        self.declare_parameter('target_heading_min_speed', 0.4)
+        self.declare_parameter('goal_yaw_weight', 0.25)
         self.declare_parameter('fault_inject_scan_timeout', False)
         self.declare_parameter('fault_inject_odom_timeout', False)
         self.declare_parameter('fault_inject_target_timeout', False)
@@ -123,6 +129,12 @@ class EgoMPCFollower(Node):
         self.cbf_front_gamma = float(self.get_parameter('cbf_front_gamma').value)
         self.cbf_q_accel = float(self.get_parameter('cbf_q_accel').value)
         self.cbf_q_steer = float(self.get_parameter('cbf_q_steer').value)
+        mpc_steer_input_cost = max(
+            0.0, float(self.get_parameter('mpc_steer_input_cost').value)
+        )
+        mpc_steer_rate_cost = max(
+            0.0, float(self.get_parameter('mpc_steer_rate_cost').value)
+        )
         self.astar_resolution = float(self.get_parameter('astar_resolution').value)
         self.astar_grid_radius = float(self.get_parameter('astar_grid_radius').value)
         self.astar_obstacle_inflation = float(self.get_parameter('astar_obstacle_inflation').value)
@@ -130,6 +142,16 @@ class EgoMPCFollower(Node):
         self.hybrid_astar_yaw_bins = int(self.get_parameter('hybrid_astar_yaw_bins').value)
         self.hybrid_astar_step_distance = float(self.get_parameter('hybrid_astar_step_distance').value)
         self.hybrid_astar_max_expansions = int(self.get_parameter('hybrid_astar_max_expansions').value)
+        self.hybrid_astar_time_budget_ms = max(
+            1.0, float(self.get_parameter('hybrid_astar_time_budget_ms').value)
+        )
+        self.target_heading_alpha = float(np.clip(
+            self.get_parameter('target_heading_alpha').value, 0.0, 1.0
+        ))
+        self.target_heading_min_speed = max(
+            0.0, float(self.get_parameter('target_heading_min_speed').value)
+        )
+        self.goal_yaw_weight = max(0.0, float(self.get_parameter('goal_yaw_weight').value))
 
         self.drive_pub = self.create_publisher(AckermannDriveStamped, drive_topic, 10)
         self.debug_drive_pub = self.create_publisher(AckermannDriveStamped, debug_drive_topic, 10)
@@ -139,6 +161,12 @@ class EgoMPCFollower(Node):
         self.planning_time_pub = self.create_publisher(Float64, '/ego_mpc/planning_time_ms', 10)
         self.solve_time_pub = self.create_publisher(Float64, '/ego_mpc/solve_time_ms', 10)
         self.planner_valid_pub = self.create_publisher(Bool, '/ego_mpc/planner_valid', 10)
+        self.front_clearance_pub = self.create_publisher(
+            Float64, '/ego_mpc/front_clearance_m', 10
+        )
+        self.path_heading_error_pub = self.create_publisher(
+            Float64, '/ego_mpc/path_heading_error_rad', 10
+        )
         self.create_subscription(Odometry, ego_topic, self.ego_callback, 10)
         self.create_subscription(Odometry, target_topic, self.target_callback, 10)
         self.create_subscription(LaserScan, scan_topic, self.scan_callback, 10)
@@ -149,6 +177,8 @@ class EgoMPCFollower(Node):
         self.config.MAX_ACCEL = max_accel
         self.config.MAX_STEER = max_steer
         self.config.MIN_STEER = -max_steer
+        self.config.Rk[1, 1] = mpc_steer_input_cost
+        self.config.Rdk[1, 1] = mpc_steer_rate_cost
         self.ego = None
         self.ego_stamp = None
         self.target = None
@@ -156,11 +186,13 @@ class EgoMPCFollower(Node):
         self.scan = None
         self.scan_stamp = None
         self.latest_astar_path = []
+        self.filtered_target_yaw = None
         self.start_time = self.get_clock().now()
         self.oa = None
         self.odelta = None
         self.valid_cycle_count = 0
         self.planner_failure_count = 0
+        self.using_straight_fallback = False
         self.last_stop_reason = None
 
         self.mpc_prob_init()
@@ -277,14 +309,20 @@ class EgoMPCFollower(Node):
         planning_ms = (time.perf_counter() - planning_start) * 1000.0
         self.planning_time_pub.publish(Float64(data=float(planning_ms)))
         self.planner_valid_pub.publish(Bool(data=bool(planner_valid)))
+        heading_step = min(3, self.config.TK)
+        path_heading_error = normalize_angle(ref_path[3, heading_step] - ego_state.yaw)
+        self.front_clearance_pub.publish(Float64(data=float(front_dist)))
+        self.path_heading_error_pub.publish(Float64(data=float(path_heading_error)))
         if not planner_valid:
             self.planner_failure_count += 1
-            if self.planner_failure_count <= self.max_transient_planner_failures:
-                self.publish_transient_deceleration('transient planner failure')
-            else:
-                self.publish_safe_stop('persistent planner failure')
-            return
-        self.planner_failure_count = 0
+            if not self.using_straight_fallback:
+                self.get_logger().warn(
+                    'PLANNER FALLBACK: using unchecked straight-line pursuit path'
+                )
+            self.using_straight_fallback = True
+        else:
+            self.planner_failure_count = 0
+            self.using_straight_fallback = False
 
         solve_start = time.perf_counter()
         (
@@ -366,8 +404,17 @@ class EgoMPCFollower(Node):
         gap_distance = math.hypot(tx - ex, ty - ey)
 
         target_yaw = yaw_from_odom(self.target)
-        if target_speed > 1e-3:
-            target_yaw = math.atan2(tvy, tvx)
+        if target_speed >= self.target_heading_min_speed:
+            measured_yaw = math.atan2(tvy, tvx)
+            if self.filtered_target_yaw is None:
+                self.filtered_target_yaw = measured_yaw
+            else:
+                yaw_delta = normalize_angle(measured_yaw - self.filtered_target_yaw)
+                self.filtered_target_yaw = normalize_angle(
+                    self.filtered_target_yaw + self.target_heading_alpha * yaw_delta
+                )
+        if self.filtered_target_yaw is not None:
+            target_yaw = self.filtered_target_yaw
 
         # Use a moderate catch-up profile so the ego car closes large gaps
         # smoothly without overly aggressive acceleration.
@@ -382,10 +429,17 @@ class EgoMPCFollower(Node):
 
         goal_x = tx - self.follow_distance * math.cos(target_yaw)
         goal_y = ty - self.follow_distance * math.sin(target_yaw)
-        path, planner_valid = self.plan_astar_path(ego_state, goal_x, goal_y)
+        path, planner_valid = self.plan_astar_path(ego_state, goal_x, goal_y, target_yaw)
         if not planner_valid or len(path) < 2:
-            self.latest_astar_path = []
-            return ref_traj, False
+            # A target-heading anchor can move sharply sideways in a tight turn.
+            # If Hybrid A* cannot connect to it, preserve the requested straight
+            # pursuit fallback but aim along the current ego-to-target line of
+            # sight, keeping the desired following distance on that line.
+            line_of_sight_yaw = math.atan2(ty - ey, tx - ex)
+            fallback_distance = max(gap_distance - self.follow_distance, 0.0)
+            fallback_goal_x = ex + fallback_distance * math.cos(line_of_sight_yaw)
+            fallback_goal_y = ey + fallback_distance * math.sin(line_of_sight_yaw)
+            path = [(ex, ey), (fallback_goal_x, fallback_goal_y)]
         self.latest_astar_path = path
 
         for i in range(self.config.TK + 1):
@@ -396,9 +450,9 @@ class EgoMPCFollower(Node):
             ref_traj[2, i] = desired_speed
             ref_traj[3, i] = ryaw
 
-        return ref_traj, True
+        return ref_traj, planner_valid
 
-    def plan_astar_path(self, ego_state: State, goal_x: float, goal_y: float):
+    def plan_astar_path(self, ego_state: State, goal_x: float, goal_y: float, goal_yaw: float):
         if self.scan is None or self.fault_enabled('fault_inject_planner_failure'):
             return [], False
 
@@ -452,6 +506,7 @@ class EgoMPCFollower(Node):
             world_to_grid,
             grid_to_world,
             resolution,
+            goal_yaw,
         )
         if not path:
             return [], False
@@ -508,7 +563,9 @@ class EgoMPCFollower(Node):
                         return candidate
         return None
 
-    def hybrid_astar_search(self, start_state, goal, occupancy, world_to_grid, grid_to_world, resolution):
+    def hybrid_astar_search(
+        self, start_state, goal, occupancy, world_to_grid, grid_to_world, resolution, goal_yaw
+    ):
         width, height = occupancy.shape
         yaw_bins = max(self.hybrid_astar_yaw_bins, 8)
         step_distance = max(self.hybrid_astar_step_distance, resolution)
@@ -557,14 +614,21 @@ class EgoMPCFollower(Node):
         pose_by_key = {start_key: start_pose}
         g_score = {start_key: 0.0}
 
-        def heuristic(x, y):
+        def position_error(x, y):
             return math.hypot(x - goal_xy[0], y - goal_xy[1])
 
+        def heuristic(x, y, yaw):
+            yaw_error = abs(normalize_angle(yaw - goal_yaw))
+            return position_error(x, y) + self.goal_yaw_weight * yaw_error
+
         expansions = 0
+        deadline = time.perf_counter() + self.hybrid_astar_time_budget_ms * 1e-3
         while open_set:
+            if time.perf_counter() >= deadline:
+                return []
             _, _, current = heapq.heappop(open_set)
             x, y, yaw = pose_by_key[current]
-            if heuristic(x, y) <= goal_tolerance:
+            if position_error(x, y) <= goal_tolerance:
                 path = [(x, y)]
                 while current in came_from:
                     current = came_from[current]
@@ -595,7 +659,7 @@ class EgoMPCFollower(Node):
                 pose_by_key[next_key] = next_pose
                 g_score[next_key] = tentative
                 counter += 1
-                priority = tentative + heuristic(nx, ny)
+                priority = tentative + heuristic(nx, ny, nyaw)
                 heapq.heappush(open_set, (priority, counter, next_key))
 
         return []
